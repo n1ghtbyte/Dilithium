@@ -10,14 +10,22 @@ eta = 2 # range of small polynomials
 #n = 4  # Degree of X^n + 1
 n = 256
 lamb  = 128 # collision strenght of c tilda
+tau = 64
 q = 2^23 - 2^13 + 1  # Finite field Z_q
 #q = 7  # Finite field Z_q
 gamma_1 = 2^17
 gamma_2 = (q-1)/88 # FIX ME 
-R = PolynomialRing(GF(q), 'x')
-x = R.gen()
-Rq = R.quotient(x^n + 1, 'a')
+Rmod = PolynomialRing(GF(q), 'x')
+x = Rmod.gen()
+Rq = Rmod.quotient(x^n + 1, 'a')
 a = Rq.gen()
+
+# for functions that not need the reduction mod q
+R = PolynomialRing(ZZ, 'y')
+y = R.gen()
+RR = R.quotient(x^n + 1, 'b')
+b = RR.gen()
+
 M = MatrixSpace(Rq, k, l)
 
 
@@ -200,6 +208,33 @@ def decompose(r):
 def HighBits(r):
     return decompose(r)[0]
 
+def LowBits(r):
+    return decompose(r)[1]
+
+
+def SampleInBall(rho: bytes):
+    c = [0] * n
+    shake = SHAKE256.new()                                                              
+    shake.update(rho)                                                                  
+    h = bytes_to_bits(shake.read(8))
+
+    used = set()
+    for i in range(n - tau, n):
+        while True:
+            j = int.from_bytes(shake.read(1), "little")
+            if j <= i and j not in used:
+                used.add(j)
+                break
+
+        c[i] = c[j]
+        c[j] = 1 if h[i + tau - n] == 0 else -1
+
+    # fips says this returns in R, but in the notation they say
+    # that c is in Rq, what is going on
+    return Rq(c)
+        
+#    pk = (rho, t)
+#    sk = (rho, K, tr, s_1, s_2)
 def sign_message(pk, sk, m: bytes):
     A = expandA(pk[0])
     mu = H256(tr + m, 512//8)
@@ -213,5 +248,10 @@ def sign_message(pk, sk, m: bytes):
         y = ExpandMask(rho_double_prime, kappa)
         w = A * y
         w_1 = [f.parent()([HighBits(c) for c in f.list()]) for f in w]
+        c_tilda = H256(mu + m, 2*lamb//8) # same as in the fips, they divide by 4
+        c = SampleInBall(c_tilda)
+        z = w + c*sk[3]
+        r_0 = [f.parent()([LowBits(c) for c in f.list()]) for f in (w-c*sk[4])]
+        
         
     return
