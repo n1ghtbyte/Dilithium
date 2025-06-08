@@ -10,19 +10,31 @@ eta = 2 # range of small polynomials
 #n = 4  # Degree of X^n + 1
 n = 256
 lamb  = 128 # collision strenght of c tilda
-tau = 64
+tau = 39
 q = 2^23 - 2^13 + 1  # Finite field Z_q
 #q = 7  # Finite field Z_q
 gamma_1 = 2^17
-gamma_2 = (q-1)/88 # FIX ME 
+gamma_2 = (q-1)/88
+beta = tau * eta
+
+q = 16417
+gamma_2 = (q-1)/32
+n = 4
+k = 3
+l = 2
+eta = 10
+gamma_1 = 1024
+tau =  4
+beta = 40
+
 Rmod = PolynomialRing(GF(q), 'x')
 x = Rmod.gen()
 Rq = Rmod.quotient(x^n + 1, 'a')
 a = Rq.gen()
 
 # for functions that not need the reduction mod q
-R = PolynomialRing(ZZ, 'y')
-y = R.gen()
+R = PolynomialRing(ZZ, 'o')
+o = R.gen()
 RR = R.quotient(x^n + 1, 'b')
 b = RR.gen()
 
@@ -56,15 +68,24 @@ def bits_to_integer(bits, n_bits):
     return sum((bit << i) for i, bit in enumerate(bits))
 
 
-def bit_unpack_centered(v_bytes, n_coeffs, n_bits):
+def bit_unpack(v_bytes, a, b):
+    """
+    Implements Algorithm 19: BitUnpack(v, a, b)
+    v: byte string of length 32 * bitlen(a + b)
+    a, b: integers (e.g., from parameter sets)
+    Returns: List of 256 integers in the interval [b - 2^c + 1, b], where c = bitlen(a + b)
+    """
+    c = (a + b).bit_length()
     z = bytes_to_bits(v_bytes)
-    coeffs = []
-    bound = 1 << (n_bits - 1)  # For centering
-    for i in range(n_coeffs):
-        val = bits_to_integer(z[i * n_bits:(i + 1) * n_bits], n_bits)
-        centered = val - bound
-        coeffs.append(centered)
-    return coeffs
+    w = []
+
+    for i in range(256):
+        bits_i = z[i * c : (i + 1) * c]
+        val = bits_to_integer(bits_i, c)
+        coeff = b - val
+        w.append(coeff)
+
+    return w
 
 
 def H256(seed: bytes, length: int) -> bytes:                                               
@@ -187,7 +208,7 @@ def ExpandMask(rho: bytes, mu: int):
         shake.update(rho_prime + domain_input)
         n_bytes = (n * n_bits + 7) // 8
         buf = shake.read(n_bytes)
-        coeffs = bit_unpack_centered(buf, n, n_bits)
+        coeffs = bit_unpack(buf, n, n_bits)
         poly = Rq(coeffs)
         poly_list.append(poly)
 
@@ -232,12 +253,28 @@ def SampleInBall(rho: bytes):
     # fips says this returns in R, but in the notation they say
     # that c is in Rq, what is going on
     return Rq(c)
-        
+
+
+def inf_norm_scalar(w):
+    """Infinity norm for an integer or Zmod(q) element."""
+    return abs(mod_centered(w, q))
+
+
+def inf_norm_poly(p):
+    """Infinity norm for a polynomial f in Z[x] or Z_q[x]."""
+    coeffs = p.list()
+    return max(inf_norm_scalar(c) for c in coeffs)
+
+
+def inf_norm_vector(poly_vec):
+    """Infinity norm for a vector of polynomials over Z or Z_q."""
+    return max(inf_norm_poly(f) for f in poly_vec)
+
 #    pk = (rho, t)
 #    sk = (rho, K, tr, s_1, s_2)
 def sign_message(pk, sk, m: bytes):
-    A = expandA(pk[0])
-    mu = H256(tr + m, 512//8)
+    A = ExpandA(pk[0])
+    mu = H256(sk[2] + m, 512//8)
     rho_double_prime = H256(sk[1] + mu, 512//8)
 
     # rejection sampling loop
@@ -248,10 +285,35 @@ def sign_message(pk, sk, m: bytes):
         y = ExpandMask(rho_double_prime, kappa)
         w = A * y
         w_1 = [f.parent()([HighBits(c) for c in f.list()]) for f in w]
-        c_tilda = H256(mu + m, 2*lamb//8) # same as in the fips, they divide by 4
+        print(f'w1: {w_1_prime}')
+        c_tilda = H256(mu + str_to_bytes(str(w_1)), 2*lamb//8) # same as in the fips, they divide by 4
         c = SampleInBall(c_tilda)
-        z = w + c*sk[3]
+        z = y + c*sk[3]
         r_0 = [f.parent()([LowBits(c) for c in f.list()]) for f in (w-c*sk[4])]
-        
-        
-    return
+
+        if inf_norm_vector(z) < gamma_1 - beta and inf_norm_vector(r_0) < gamma_2 - beta:
+            found = True
+
+        kappa += 8
+    print(f'Repetitions: {kappa//8}')
+    return c_tilda, z
+
+
+
+#    pk = (rho, t)
+#    sk = (rho, K, tr, s_1, s_2)
+def verify_sig(pk, m: bytes, c_tilda, z):
+        A = ExpandA(pk[0])
+        mu = H256(sk[2] + m, 512//8)
+        c = SampleInBall(c_tilda)
+        w_1_prime = [f.parent()([HighBits(c) for c in f.list()]) for f in A*z - c*pk[1]]
+        print(f'w1_prime: {w_1_prime}')
+        return c_tilda == H256(mu + str_to_bytes(str(w_1_prime)), 2*lamb//8)
+
+
+seed = b'fips could explain things better...'
+pk, sk = key_gen(seed)
+message = b'Ultra secret message ahahah'
+signature = sign_message(pk, sk, message)
+print('Checking if they match')
+print(verify_sig(pk, message, signature[0], signature[1]))
